@@ -413,7 +413,7 @@ def main():
         scalp = scalp[np.random.choice(len(scalp), 100, replace=False)]
 
     print('Performing PCA warping...')
-    bnd_w_ctf = pca_surfacemesh_warping(fiducials, scalp)
+    bnd_w_ctf, _ = pca_surfacemesh_warping(fiducials, scalp)
 
     output_dir = os.path.dirname(args.scalp)
     inv = np.linalg.pinv(transform)  # CTF -> input frame

@@ -51,7 +51,7 @@ def elec_warp(elecpos, pcas, mean_head, std_dev, onebyone=False):
     pos = pca2tri(x_p, pcas, mean_head, std_dev, wise='head')
     reconstructed = {shell: (pos[shell], mean_head[shell][1]) \
                      for shell in shells}
-    return reconstructed
+    return reconstructed, x_p
 
 
 def pca_warp(head, pcas, mean_bnd, std_dev, known='scalp'):
