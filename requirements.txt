@@ -1,12 +1,12 @@
+# Runtime dependencies. Install with:  pip install -r requirements.txt
+# or, preferably:                      pip install -e .
 numpy>=1.22
 scipy>=1.8
-scikit-learn>=1.0
-scikit-image>=0.19
-numba>=0.56
+scikit-image>=0.19        # tissue-mask post-processing (cedalion export)
+numba>=0.56               # JIT for the optional --regularize penalty
 trimesh>=3.20
 vtk>=9.1
 nibabel>=4.0
-mne>=1.0
-xarray>=2022.3
-tqdm>=4.60
-matplotlib>=3.5
+matplotlib>=3.5           # qc.png
+mne>=1.0                  # optional: MNE subject-directory export
+xarray>=2022.3            # optional: cedalion digitized->RAS transform

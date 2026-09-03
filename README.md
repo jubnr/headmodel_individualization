@@ -1,4 +1,11 @@
-# Headmodel Individualization      
+# Headmodel Individualization
+
+> **This is a fork of [harmening/headmodel_individualization](https://github.com/harmening/headmodel_individualization).**
+> The algorithm and the PCA bases are unchanged. What this fork adds is everything around them:
+> automatic fiducial handling, a quality-control gate on every run, reproducible output, and a
+> roughly 3x faster pipeline. See [Changes in this fork](#changes-in-this-fork) for the full list
+> and the reasoning.
+
 **The presented PCAwarp algorithm estimates individual head anatomies based on a large database of heads when structural MRI/CT scans are unavailable using scalp data from photogrammetry or digitized electrode positions. The final surfaces meshes can be used to construct a BEM volume conduction head model for source reconstruction with e.g. [OpenMEEG](https://openmeeg.github.io/).<br>
 In our related scientific publication ["Data-driven head model individualization from digitized electrode positions or photogrammetry improves M/EEG source localization accuracy"](https://direct.mit.edu/imag/article/doi/10.1162/IMAG.a.1073/134446) we demonstrate that our individualized PCAwarp head model outperformes any other head model in terms of source localization error (synthetic EEG data, SNR=10):**
 <img src="img/Simulation_study_raincloud.png"><br>
@@ -81,11 +88,33 @@ clicking on the fiducials and writing the coordinates down:
 
 ## Headmodel individualization
 ### 6. Call the PCAwarp algorithm
+> ### :warning: You need a second repository
+> With the default `HARTMUT = True`, PCAwarp also warps the [HArtMuT](https://github.com/harmening/HArtMuT)
+> artefact sources (eye and muscle dipoles) into the individual head. Those sources and their
+> template meshes live in the **HArtMuT repository**, which is a *separate clone* and is not
+> vendored here. `PCAwarp.py` expects it as a **sibling directory**:
+>
+> ```
+> parent/
+> ├── headmodel_individualization/   <- this repo
+> └── HArtMuT/                       <- git clone https://github.com/harmening/HArtMuT
+> ```
+>
+> Specifically it reads `HArtMuT/HArtMuTmodels/HArtMuT_NYhead_small.mat` and
+> `HArtMuT/individualwarp/NYhead/{scalp,skull}.stl`. If your copy lives somewhere else, edit
+> `HARTMUT_REPO` at the top of `PCAwarp.py`. If you do not want the artefact model at all, set
+> `HARTMUT = False` — but note that this also switches the PCA basis from `data/pcas_hartmut`
+> (neck-extended scalp, no cortex variance) to `data/pcas` (no neck, cortex variance present).
+>
+> The run stops immediately with instructions if the checkout is missing, rather than failing
+> after a multi-minute fit.
+
 ```
-# Clone the repository and install the requirements
+# Clone this repository and its HArtMuT companion side by side
 git clone https://github.com/harmening/headmodel_individualization
+git clone https://github.com/harmening/HArtMuT
 cd headmodel_individualization
-pip install -r requirements.txt
+pip install -e .            # or: pip install -r requirements.txt
 ```
 The script `PCAwarp.py` shows how to start the PCAwarp individualization algorithm. This is based on a low-dimensional representation (PCA) of head shape surface meshes trained on an equally segmented and triangulated MRI database of 316 subjects. Warping is done by finding weights for the PCs by minimizing the shape difference between electrodes / scalp proxies and fitted scalp. Exemplary call:<br>
 ```
@@ -170,6 +199,89 @@ ruff check .
 
 
 
+
+
+## Changes in this fork
+
+The algorithm, the PCA bases and the export formats are unchanged. Everything below came out of
+auditing one real run that produced a completely unusable head model without the pipeline
+noticing: the fiducials had been pasted in as mesh **vertex indices** rather than coordinates, and
+the scan was exported in **metres** while the pipeline assumes millimetres. The warp fitted its 16
+components to what was effectively a single point and returned four watertight, properly nested,
+entirely plausible surfaces that matched the scan **worse than no warping at all** (median 8.4 mm,
+against 4.5 mm for the unwarped template). It exited 0 and said nothing.
+
+### Fiducials and units are handled for you
+* Landmarks are read from a file next to the scan — MeshLab `.pp`, 3D Slicer `.mrk.json`/`.fcsv`,
+  or plain text — so they no longer have to be retyped. `-fiducials`, and `-nas`/`-lpa`/`-rpa`,
+  still work and take precedence.
+* Values that are really **vertex indices** are recognised and looked up on the mesh.
+* A scan in **metres or centimetres** is rescaled to mm automatically.
+* Landmark spacing outside human range is **refused**, printing the offending distances, and a
+  scalp cloud that collapses after the CTF transform stops the run instead of being fitted.
+
+### Every run checks its own output
+`src/qc.py` writes `qc.json` and `qc.png` beside the meshes and **refuses to export a model that
+fails**. The decisive figure is the scalp fit against the full input cloud shown next to the same
+fit for the unwarped template — a warp that does not beat the population mean has not worked,
+whatever the surfaces look like. It also records watertightness, Euler number, normal orientation,
+inter-shell gaps, field-of-view clipping, the fitted PC coefficients, how far the warp moved the
+scalp from the mean head, and the full provenance of the run. `--no-qc-gate` exports anyway.
+
+### Results are reproducible
+The scalp cloud used to be decimated with an unseeded `np.random.choice`. Three runs of one scan
+through identical code gave scalp meshes differing by **mean 1.5 mm, max 5.9 mm** — the same order
+as the total fit error, so two people running the same scan got different head models and
+different source localizations. Farthest-point sampling replaces it: deterministic, and it halves
+the worst coverage gap (26 mm vs 47–66 mm). On the reference scan the fit improved from 1.99 mm to
+**1.52 mm** median as a side effect. Two runs now produce byte-identical meshes.
+
+### About 3x faster: 5:17 → 1:49
+* The warp optimizer rebuilt its ray caster on **every objective evaluation** by writing an ASCII
+  STL to a fresh temp directory and reading it back through `vtkSTLReader` — 71 % of each
+  evaluation, thousands of times per fit, leaking a directory each time (~14 000 of them and
+  2.8 GB had accumulated in `/tmp` here). It is now built in memory from the numpy arrays, at
+  float32 because that is what `vtkSTLReader` emitted, so ray results are **bit-identical**.
+* `tri2nii` walked all 12.9 M voxels in nested Python loops twice per shell — 104 M iterations per
+  run — and pushed 17 M points into VTK one at a time. Both are array operations now, against the
+  same `vtkSelectEnclosedPoints` test.
+* `tri_io.vertex_normals` was O(vertices × faces) via a per-vertex `np.argwhere` scan. A
+  scatter-add gives bit-identical normals ~200x faster.
+
+### Export bugs fixed
+* **The cortex was never individualized.** `data/pcas_hartmut` ships with an all-zero cortex PCA
+  block, so `inner_csf.surf` came back identical to the template mean in every run, and the csf
+  surface — which does warp — crossed it by up to 6.4 mm. The basis cannot be rebuilt without the
+  source MRI database, so the dead block is now detected and the cortex follows the csf
+  displacement instead (the two share a triangulation and agree on vertex direction to ~4°), with
+  the few remaining contacts clamped. It is announced on every run.
+* **`mne/pcawarp/bem/*.surf` were written in voxel index space**, 127/127/94 mm away from the
+  surface RAS that MNE reads them as, because `tri2nii` shifted the caller's vertex arrays in place
+  and `export_cedalion` mutated the dict `export_mne` then wrote.
+* **`T1.mgz` was written RAS-ordered** while nibabel's `get_vox2ras_tkr()` always assumes an
+  LIA-conformed volume — deriving the surface RAS frame from it would have **mirrored the head
+  left–right**. It is properly conformed now.
+* **`ditigized2ras-trans.fif` carried a millimetre translation**; MNE transforms are metres, so the
+  head sat 117 m away.
+* **Every surface was wound inward**, which makes `mne.make_bem_solution` reject the BEM outright.
+* **The neck was silently clipped.** Padding was a fixed 10 voxels on the *superior* side while the
+  neck-extended scalp runs off the *inferior* edge — 20 % of scalp vertices fell outside the masks
+  and `T1.mgz`. Padding is now derived from the mesh bounding box on all six sides.
+
+`mne.make_bem_model`, `mne.make_bem_solution` and `mne.viz.plot_bem` all work on the exported
+subject directory now, and the `head→mri` transform round-trips onto `outer_skin.surf` to 1e-5 mm.
+
+### Housekeeping
+* `--regularize` exposes the regularizer the README already advertised but that was unreachable
+  behind a hard-coded default. **Experimental**: its penalty is unweighted against the shape
+  distance and can dominate and blow the fit up.
+* `scipy` was imported but missing from `requirements.txt`, so a clean install could not run the
+  pipeline at all. `scikit-learn`, `tqdm` and `nilearn` were listed or imported but unused and are
+  gone. Added `pyproject.toml` so `pip install -e .` works.
+* 69 tests (65 fast, 4 marked `slow`) and a GitHub Actions run. There were none.
+* Removed unreachable code: `pca_warp()`, `error1by1()` and the `onebyone` branch,
+  `load_elecs_txt()`, `transform_to_ctf.apply()`, and the commented-out regularizer variants.
+  `ruff` is clean.
 
 ## Citing
 If you find the headmodel individualization useful for your research, please consider citing our related [paper](https://direct.mit.edu/imag/article/doi/10.1162/IMAG.a.1073/134446).

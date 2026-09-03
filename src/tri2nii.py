@@ -112,7 +112,6 @@ def tri2nii(bnds, output_dir=None, transform=np.eye(4), t1_fn='template.nii', me
             new_data = np.zeros(data.shape, dtype=np.uint8)
             new_data[data == tissue_label] = 1
 
-            #new_img = nilearn.image.new_img_like(t1,new_data,affine=affine)
             # nibabel derives dim from the data shape; the old manual
             # header['dim'] += pad fixup is both unnecessary and wrong now
             # that padding differs per side.
@@ -131,7 +130,6 @@ def tri2nii(bnds, output_dir=None, transform=np.eye(4), t1_fn='template.nii', me
         new_data = np.zeros(data.shape)
         for tissue_label in range(1, len(bnds)+1):
             new_data[data == tissue_label] = tissue_color[tissue_label]
-        #new_img = nilearn.image.new_img_like(t1,new_data,affine=affine)
         new_img = nib.nifti1.Nifti1Image(new_data, affine, t1.header)
         if output_dir is not None:
             output_file = output_dir + '/T1.mgz'

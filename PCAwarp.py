@@ -61,6 +61,29 @@ FALLBACK_DONOR = {'cortex': 'csf'}
 # =====================
 # Core Functions
 # =====================
+def check_hartmut_available():
+    """Fail before the warp, not after it, if the HArtMuT checkout is missing.
+
+    The artefact sources live in the HArtMuT repository, which is a separate
+    clone this one expects as a sibling directory. Without it the run used to
+    get all the way through a multi-minute fit and then die on a missing .mat.
+    """
+    missing = [path for path in
+               [HARTMUT_MODEL, HARTMUT_TEMPLATE['scalp'],
+                HARTMUT_TEMPLATE['skull']] if not os.path.isfile(path)]
+    if not missing:
+        return
+    raise FileNotFoundError(
+        'HARTMUT is True but the HArtMuT repository was not found. It is a '
+        'separate clone:\n\n'
+        '    git clone https://github.com/harmening/HArtMuT\n\n'
+        f'expected next to this one, at {os.path.abspath(HARTMUT_REPO)}.\n'
+        'Missing:\n  ' + '\n  '.join(missing)
+        + '\nEither clone it there, point HARTMUT_REPO in PCAwarp.py at your '
+          'copy, or set HARTMUT = False to skip the artefact model (the PCA '
+          'basis changes too - see the README).')
+
+
 def pca_surfacemesh_warping(fiducials, optodes, regularize=False):
     """Perform PCA-based surface mesh warping."""
     mean_bnd = np.load(MEAN_HEAD, allow_pickle=True).item()
@@ -568,6 +591,9 @@ def main():
                               distance, so it can dominate and blow the fit \
                               up. Off by default.')
     args = parser.parse_args()
+
+    if HARTMUT:
+        check_hartmut_available()
 
     scalp, nas, lpa, rpa = load_scalp_file(args.scalp, args.nas, args.lpa,
                                            args.rpa)
