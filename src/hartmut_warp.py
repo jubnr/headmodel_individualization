@@ -102,6 +102,6 @@ def warp_hartmut(artefact_pos, labels, source_head, target_head, mean_pnt):
     FieldTrip export hands to the example as eye.pos.
     """
     new_pos = project_points(artefact_pos, source_head, target_head, mean_pnt)
-    labels = np.asarray([str(l) for l in np.ravel(labels)])
-    eye_pos = new_pos[np.array([is_left_eye(l) for l in labels])]
+    labels = np.asarray([str(lab) for lab in np.ravel(labels)])
+    eye_pos = new_pos[np.array([is_left_eye(lab) for lab in labels])]
     return new_pos, eye_pos

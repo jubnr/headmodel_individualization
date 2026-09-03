@@ -15,7 +15,6 @@ doi:10.1088/1741-2560/10/6/066004.
 import os
 import numpy as np
 import nibabel as nib
-import trimesh
 import scipy.ndimage
 from skimage.measure import label, regionprops
 from skimage.morphology import remove_small_objects
@@ -200,7 +199,7 @@ def segmentation_postprocessing(
                 siz, _ = sizeOfObject(img[csf_tissue])
                 try:
                     thres = siz[3]+1
-                except:
+                except IndexError:
                     thres = 3
                 img[csf_tissue] = remove_small_objects(img[csf_tissue],
                                                        min_size=thres)
@@ -213,7 +212,7 @@ def segmentation_postprocessing(
         siz, _ = sizeOfObject(img["skin"])
         try:
             thres = siz[1]+1
-        except:
+        except IndexError:
             thres = 3
         img["skin"] = remove_small_objects(img["skin"], min_size=thres)
 

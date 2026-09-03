@@ -2,13 +2,6 @@
 import numpy as np
 
 
-def load_elecs_txt(fn):
-    with open(fn, 'r') as f:
-        elecs = [[float(i) for i in line.split()] for line in f.readlines()]
-    return np.array(elecs)
-
-
-
 def load_tri(filename, print_warnings=False):
     """ Loads mesh from tri-file
     Parameters
@@ -34,12 +27,12 @@ def load_tri(filename, print_warnings=False):
         inds = range(1, 4)
     else:
         raise IOError('Unrecognized format of data.')
-    pos = np.array([np.array([float(v) for v in l.split()])[inds]
-                   for l in lines[1:n_nodes + 1]])
-    tris = np.array([[int(l.split()[ind]) for ind in inds]
-                     for l in lines[n_nodes + 2:n_nodes + 2 + n_tris]])
+    pos = np.array([np.array([float(v) for v in ln.split()])[inds]
+                   for ln in lines[1:n_nodes + 1]])
+    tris = np.array([[int(ln.split()[ind]) for ind in inds]
+                     for ln in lines[n_nodes + 2:n_nodes + 2 + n_tris]])
     tris -= 1
-    if not n_items in [3, 4] and print_warnings:
+    if n_items not in [3, 4] and print_warnings:
         print('Node normals were not read.')
     # ensure that tris start at zero
     if np.min(tris) != 0:
@@ -93,15 +86,13 @@ def calc_normal(p1, p2, p3):
     return np.cross(p2-p1, p3-p1)
 
 def normals_for_faces(vertices, faces):
-    normals_f = np.zeros(faces.shape)
+    vertices = np.asarray(vertices, dtype=float)
+    faces = np.asarray(faces)
     # ensure that tris start at zero
     if np.min(faces) != 0:
-        tri_min = np.min(faces)
-        faces -= tri_min
-    for i, tri in enumerate(faces):
-        pos = [vertices[tri[ii]] for ii in range(3)]
-        normals_f[i,:] = calc_normal(*pos)
-    return normals_f
+        faces = faces - np.min(faces)
+    p1, p2, p3 = (vertices[faces[:, i]] for i in range(3))
+    return calc_normal(p1, p2, p3)
 
 def get_normals(vertices, faces):
     normals_v = normals_for_faces(vertices, faces)
@@ -136,8 +127,8 @@ def surface_area(vertices, faces):
     y3= vertices[faces[:,2],1]
     z3= vertices[faces[:,2],2]
     area = np.sqrt(pow((y2-y1)*(z3-z1)-(y3-y1)*(z2-z1), 2) +
-		   pow((z2-z1)*(x3-x1)-(z3-z1)*(x2-x1), 2) +
-		   pow((x2-x1)*(y3-y1)-(x3-x1)*(y2-y1), 2))
+                   pow((z2-z1)*(x3-x1)-(z3-z1)*(x2-x1), 2) +
+                   pow((x2-x1)*(y3-y1)-(x3-x1)*(y2-y1), 2))
     return sum(area)
 
 def verts_normals_orientation(vertices, faces, normals, normalsIn):
@@ -160,16 +151,39 @@ def verts_normals_orientation(vertices, faces, normals, normalsIn):
 
 
 def vertex_normals(faces, face_normals):
-    normals = np.zeros((faces.max()+1, 3))
-    """
-    summed = np.zeros((vertex_count, 3))
-    for face, normal in zip(faces, face_normals):
-        summed[face] += normal
-
-    """
-    for i in range(faces.max()+1):
-        tris = np.argwhere(faces == i)[:,0]
-        normals[i,:] += np.sum(face_normals[np.ix_(tris)], axis=0)
-        norm_i = np.sqrt(np.sum([pow(normals[i,ii], 2) for ii in range(3)]))
-        normals[i,:] /= norm_i
+    """Area-weighted vertex normals, by scattering each face normal onto its
+    three vertices. The previous per-vertex np.argwhere scan was O(V*F)."""
+    faces = np.asarray(faces)
+    face_normals = np.asarray(face_normals, dtype=float)
+    normals = np.zeros((faces.max() + 1, 3))
+    for i in range(3):
+        np.add.at(normals, faces[:, i], face_normals)
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        normals /= lengths
     return normals
+
+
+def signed_volume(pos, tris):
+    """Volume enclosed by a closed mesh, signed by the triangle winding.
+
+    Positive means the right-hand rule sends the face normals outward, which
+    is what OpenMEEG, FieldTrip and MNE all expect.
+    """
+    pos = np.asarray(pos, dtype=float)
+    tris = np.asarray(tris, dtype=int)
+    a, b, c = pos[tris[:, 0]], pos[tris[:, 1]], pos[tris[:, 2]]
+    return float(np.einsum('ij,ij->i', a, np.cross(b, c)).sum() / 6.0)
+
+
+def orient_outward(pos, tris):
+    """Return `tris` wound so that the face normals point out of the surface.
+
+    The PCA database is stored with inward winding, which makes
+    mne.make_bem_solution reject the surfaces ("sum of solid angles yielded
+    -1, should be 1"), so the warped meshes are flipped once before export.
+    """
+    tris = np.asarray(tris, dtype=int)
+    if signed_volume(pos, tris) < 0:
+        tris = tris[:, ::-1]
+    return np.ascontiguousarray(tris)

@@ -11,20 +11,17 @@ def transform_to_ctf(pts, nas, lpa, rpa, mean_scalp=None, return_transform=False
     # the whole head surface!
     if mean_scalp is not None:
         mean_scalp = mean_scalp[mean_scalp[:, 2] > 0]
-        shift, min_distance = find_optimal_shift(pts_ctf, mean_scalp)
-        #shift = np.array([shift[0],0,0])
-        shift[1] = 0
-        shift[2] = 0
-        transform[0:3,3] += shift
+        dx, min_distance = find_optimal_shift(pts_ctf, mean_scalp)
+        transform[0, 3] += dx
     pts_ctf = apply_transform(transform, pts)
     if return_transform:
         return pts_ctf, transform
     return pts_ctf
 
 
-def compute_total_distance(shift, A, B_tree):
-    # Apply shift in x, y, z directions
-    A_shifted = A + shift  # shift is a length-3 array [dx, dy, dz]
+def compute_total_distance(dx, A, B_tree):
+    # Shift along x only; the caller never used the other two components.
+    A_shifted = A + np.array([float(np.ravel(dx)[0]), 0.0, 0.0])
 
     # Find nearest neighbor in B for each point in A
     distances, _ = B_tree.query(A_shifted)
@@ -32,14 +29,13 @@ def compute_total_distance(shift, A, B_tree):
     # Return total Euclidean distance
     return np.sum(distances)
 
-def find_optimal_shift(A, B, initial_guess=(0.0, 0.0, 0.0)):
-    # Create KDTree for fast nearest neighbor search
+
+def find_optimal_shift(A, B, initial_guess=0.0):
+    """Best rigid shift of A onto B along x. Returns (dx, total distance)."""
     B_tree = cKDTree(B)
-
-    # Minimize the distance function with respect to 3D shift
-    result = minimize(compute_total_distance, initial_guess, args=(A, B_tree), method='L-BFGS-B')
-
-    return result.x, result.fun
+    result = minimize(compute_total_distance, [initial_guess],
+                      args=(A, B_tree), method='L-BFGS-B')
+    return float(result.x[0]), result.fun
 
 
 def get_transform(nas, lpa, rpa):
@@ -78,12 +74,5 @@ def apply_transform(M, pos):
     # apply transformation
     hom = (M.dot(hom.T)).T
     # backconversion
-    pos = np.array([hom[i,:3] / hom[i,3] for i in range(hom.shape[0])])
+    pos = hom[:, :3] / hom[:, 3:4]
     return pos
-
-def apply(transformation, old):
-    m, n = old.shape
-    old = np.hstack((old, np.ones((m, 1))))
-    new = np.dot(old, transformation.T)
-    new = new[:, :3]
-    return new

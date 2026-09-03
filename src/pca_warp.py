@@ -1,110 +1,56 @@
 #!/usr/bin/env python
-import os, numpy as np
-from sklearn.linear_model import LinearRegression
+import numpy as np
+import trimesh
 from scipy.optimize import minimize
-import trimesh, tempfile
-from random import random 
-import src.pca_pycaster as pycaster
 from numba import jit
 
-# only for triangle difference regularization (compile cython code before):
-# https://github.com/MattiaMontanari/openGJK
-#import src.openGJK_cython as opengjk 
+import src.pca_pycaster as pycaster
+from src.vtk_utils import bnd2polydata
 
 
+def elec_warp(elecpos, pcas, mean_head, std_dev, regularize=False):
+    """Fit the PCA weights so the reconstructed scalp passes through elecpos.
 
-def elec_warp(elecpos, pcas, mean_head, std_dev, onebyone=False):
-    # Warp to electrode positions or other point clouds
-    scalp_tris = mean_head['scalp'][1]
+    `regularize` adds a penalty for shells coming closer than 5 mm to each
+    other (see `regularizer`). Experimental: the penalty is a raw sum over
+    every offending vertex pair and is not weighted against the shape
+    distance, so on a head whose shells already intersect it dominates the
+    objective and the fit runs away. It is also about 10x slower. Off by
+    default; `enforce_nesting` is the cheap post-hoc alternative.
+    """
     all_tris = {k: v[1] for k, v in mean_head.items()}
     num_pcas, pca_dim, dim = pcas.shape
     shells = list(mean_head.keys())
-    bndsize = [len(mean_head[shell][0]) for shell in shells]
-    # Determine mean_pnt for surface-line-intersection 
+    # Determine mean_pnt for surface-line-intersection
     mean_pnt = np.mean(mean_head['cortex'][0], axis=0)
     min_idx, min_dist = shortest_dist(mean_pnt, mean_head['scalp'][0])
-    new_z = np.max(mean_head['scalp'][0][:,2]) - min_dist
+    new_z = np.max(mean_head['scalp'][0][:, 2]) - min_dist
     mean_pnt[2] = new_z
 
-    # Minimize shape_distance
-    if not onebyone:
-        # all PCs at the same time 
-        x0 = np.ones(num_pcas)
-        res = minimize(error, x0, args=(pcas, mean_head, std_dev, all_tris, \
-                                        mean_pnt, elecpos),
-                                  options={'disp':False,'eps':0.5}) # mm
-        #print(res)
-        x_p = res.x
-   
-    else:
-        # Minimize 1 PC after another
-        x_p = np.zeros(num_pcas)
-        for i in range(num_pcas):
-            x0 = 1.0
-            res = minimize(error1by1, x0, args=(i, x_p, pcas, mean_head, \
-                                                std_dev, all_tris, mean_pnt, \
-                                                elecpos),
-                                        options={'disp':False,'eps':0.1})
-            print("%d. PCA coefficient: %f" % (i+1, res.x[0]))
-            x_p[i] = res.x[0]
-    
+    # Minimize shape_distance over all PCs at once
+    x0 = np.ones(num_pcas)
+    res = minimize(error, x0,
+                   args=(pcas, mean_head, std_dev, all_tris, mean_pnt,
+                         elecpos, regularize),
+                   options={'disp': False, 'eps': 0.5})  # mm
+    x_p = res.x
+
     pos = pca2tri(x_p, pcas, mean_head, std_dev, wise='head')
-    reconstructed = {shell: (pos[shell], mean_head[shell][1]) \
+    reconstructed = {shell: (pos[shell], mean_head[shell][1])
                      for shell in shells}
     return reconstructed, x_p
 
 
-def pca_warp(head, pcas, mean_bnd, std_dev, known='scalp'):
-    # Warp to known vertex positions of SAME TRIANGULATION as usied in PCA
-    # construction
-    shells = head.keys()
-    idx = [i for i, shell in enumerate(shells) if shell==known][0]
-    num_pcas, dim_pcas, dim = pcas.shape
-    known_bnd = head[known][0]
-    num_pos, dim = known_bnd.shape
-
-    # flatten vertex coordinates and standardize
-    tot = num_pos * dim
-    known_bnd = ((known_bnd.reshape(tot) - mean_bnd[idx*tot:(idx+1)*tot])  \
-                 / std_dev[idx*tot:(idx+1)*tot])
-    known_bnd.reshape((num_pos, dim))
-    bndsize = [len(head[shell][0]) for shell in shells]
-    start = sum(bndsize[:idx])
-    size = bndsize[idx]
-    assert size == num_pos
-    # prepare minimization
-    X = pcas[:,start:start+size,:].reshape(num_pcas, size*dim).T
-    y = known_bnd.reshape((num_pos*dim))
-    # do fit until sufficient accuracy is achieved
-    reg = LinearRegression(fit_intercept=True, normalize=False).fit(X, y)
-    repeat = 0
-    while reg.score(X, y) < 0.1 and repeat < 5:
-        reg = LinearRegression(fit_intercept=True, normalize=False).fit(X, y)
-        repeat += 1
-    #print('Score of lin.reg warping: %f' % reg.score(X, y))
-    x_p = reg.coef_
-    # Reconstruct surface meshes from PC parameters
-    warped = {}
-    for s, shell in enumerate(shells):
-        start = sum(bndsize[:s])
-        size = bndsize[s]
-        warped[shell] = pcas[:,start:start+size,:].reshape(num_pcas, size*dim)
-        warped[shell] = warped[shell].T.dot(x_p)
-        start *= dim  
-        size *= dim  
-        warped[shell] *= std_dev[start:start+size]
-        warped[shell] += mean_bnd[start:start+size]
-        warped[shell] = warped[shell].reshape(bndsize[s], dim)
-    return warped
-
-
 def caster(pos, tris):
-    mesh = trimesh.Trimesh(pos, tris)
-    fn = os.path.join(tempfile.mkdtemp(), 'stl_'+str(random()))
-    mesh.export(file_obj=fn, file_type='stl_ascii')
-    vtk_caster = pycaster.rayCaster.fromSTL(fn, scale=1.0)  
-    os.remove(fn)
-    return vtk_caster
+    """Ray caster for a mesh, built straight from the numpy arrays.
+
+    This used to export an ASCII STL to a fresh temp directory and read it
+    back with vtkSTLReader on every objective evaluation - 71% of the cost of
+    a fit, and one leaked temp directory per evaluation. The mesh is built at
+    float32 because that is what vtkSTLReader produced, so the optimizer
+    follows exactly the same trajectory as before.
+    """
+    return pycaster.rayCaster(bnd2polydata(pos, tris))
 
 def shortest_dist(vert_pos, list_of_pos):
     min_idx, min_dist = 0, np.linalg.norm(list_of_pos[0] - vert_pos)
@@ -181,56 +127,24 @@ def pca2tri(coeff, pcas, mean_head, std_dev, wise='head'):
     return reconstructed
 
 
-def error(x_p, pcas, mean_head, std_dev, all_tris, mean_pnt, elecpos, 
-          #regularize=True):
+def error(x_p, pcas, mean_head, std_dev, all_tris, mean_pnt, elecpos,
           regularize=False):
     pos = pca2tri(x_p, pcas, mean_head, std_dev, wise='head')
-    scalp_tris = all_tris['scalp']
-    fit_bnd = (pos['scalp'], scalp_tris)
+    fit_bnd = (pos['scalp'], all_tris['scalp'])
     diff = shape_distance(elecpos, fit_bnd, mean_pnt)
 
-    # regularize mesh intersections (vertex difference) # best option
+    # penalize shells that come too close to each other
     if regularize:
-        shells = list(mean_head.keys())
         shells = ['cortex', 'csf', 'skull', 'scalp']
         bndsize = np.array([len(pos[shell]) for shell in shells])
         warped = np.zeros((np.sum(bndsize), 3))
         start = 0
         for s, shell in enumerate(shells):
-            warped[start:start+bndsize[s],:] = pos[shell]
+            warped[start:start + bndsize[s], :] = pos[shell]
             start += bndsize[s]
         diff += regularizer(warped, bndsize)
 
-    """
-    ## regularize mesh intersections (triangle difference) # slow!
-    if regularize: 
-        shells = ['cortex', 'csf', 'skull', 'scalp']
-        warped = {shell: (pos[shell], all_tris[shell]) for shell in shells}
-        triangles = {shell: np.array([[warped[shell][0][i] for i in t] \
-                     for t in warped[shell][1]]) for shell in shells}
-        for s in range(1, len(shells)):
-            #for ii in triangles[shells[s-1]]:
-            #    for jj in triangles[shells[s]]:
-            #        dist = opengjk.pygjk(ii, jj)
-            #        if dist < 0.001:
-            #            diff += (0.001-dist)
-            diff += opengjk.pygjk_penalize_close_meshes(triangles[shells[s-1]],
-                                                        triangles[shells[s]],
-                                                        thresh=5.0) #5mm
-
-    # regularize edge length  # not so successful
-    if regularize:
-        for shell in ['skull', 'csf', 'cortex']:
-            pdist = [[pos[shell][p] for p in face] for face in scalp_tris]
-            edge_len = [[abs(np.linalg.norm(p[0]-p[1])), 
-                         abs(np.linalg.norm(p[0]-p[2])),
-                         abs(np.linalg.norm(p[1]-p[2]))] for p in pdist]
-            pdist = [abs(e[0]-e[1]) + abs(e[1]-e[2]) + abs(e[0]-e[2]) \
-                     for e in edge_len]
-            diff += np.mean(np.array(pdist).flatten())  
-
-    """
-    return diff 
+    return diff
 
 
 @jit(nopython=True, parallel=True)
@@ -258,6 +172,59 @@ def regularizer(warped, bndsize):
 
 
 
-def error1by1(x_i, i, x_p, pcas, mean_head, std_dev, all_tris, mean_pnt, elecpos):
-    x_p[i] = x_i
-    return error(x_p, pcas, mean_head, std_dev, all_tris, mean_pnt, elecpos)
+def degenerate_shells(pcas, mean_head):
+    """Shells whose PCA block carries no variance at all.
+
+    Such a shell is returned unchanged by the reconstruction no matter what
+    the scalp looks like: `data/pcas_hartmut` ships with an all-zero cortex
+    block, so the cortex would silently stay at the template mean.
+    """
+    shells = list(mean_head.keys())
+    bndsize = [len(mean_head[shell][0]) for shell in shells]
+    dead = []
+    for s, shell in enumerate(shells):
+        start = sum(bndsize[:s])
+        block = pcas[:, start:start + bndsize[s], :]
+        if not np.any(block):
+            dead.append(shell)
+    return dead
+
+
+def transfer_displacement(reconstructed, mean_head, src, dst):
+    """Move `dst` by the displacement the warp gave `src`.
+
+    Only meaningful for two shells that share a triangulation and a radial
+    vertex correspondence, as csf and cortex do in this database (the two
+    surfaces agree on vertex direction to within ~4 degrees). It is an
+    approximation, not a fit - but it keeps a shell that the PCA cannot
+    individualize from being left behind by, and then crossing, the shell
+    outside it.
+    """
+    if not np.array_equal(mean_head[src][1], mean_head[dst][1]):
+        raise ValueError(f'{src} and {dst} do not share a triangulation.')
+    shift = reconstructed[src][0] - mean_head[src][0]
+    return (mean_head[dst][0] + shift, reconstructed[dst][1])
+
+
+def enforce_nesting(bnd, outer, inner, margin=0.5):
+    """Pull `inner` vertices back inside `outer`, keeping `margin` mm of gap.
+
+    The warp fits each shell independently, so two neighbouring surfaces can
+    touch or cross where the gap between them is thin to begin with. Vertices
+    that offend are moved to the closest point on the outer surface and then
+    `margin` inwards along its normal - the smallest correction that restores
+    a valid nesting. Returns the corrected shell and how many vertices moved.
+    """
+    from src.tri_io import signed_volume
+
+    outer_mesh = trimesh.Trimesh(bnd[outer][0], bnd[outer][1], process=False)
+    pos = np.array(bnd[inner][0], dtype=float)
+    closest, dist, tri_id = trimesh.proximity.closest_point(outer_mesh, pos)
+    offending = ~outer_mesh.contains(pos) | (dist < margin)
+    if not np.any(offending):
+        return bnd[inner], 0
+
+    outward = np.sign(signed_volume(outer_mesh.vertices, outer_mesh.faces))
+    normals = outward * outer_mesh.face_normals[tri_id[offending]]
+    pos[offending] = closest[offending] - margin * normals
+    return (pos, bnd[inner][1]), int(offending.sum())

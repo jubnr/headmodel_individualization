@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "headmodel-individualization"
+version = "0.1.0"
+description = "PCAwarp: individualized BEM head models from photogrammetry or digitized electrode positions"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE.txt" }
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "scikit-learn>=1.0",
+    "scikit-image>=0.19",
+    "numba>=0.56",
+    "trimesh>=3.20",
+    "vtk>=9.1",
+    "nibabel>=4.0",
+    "mne>=1.0",
+    "xarray>=2022.3",
+    "tqdm>=4.60",
+    "matplotlib>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[project.scripts]
+pcawarp = "PCAwarp:main"
+
+[tool.setuptools]
+packages = ["src"]
+py-modules = ["PCAwarp"]
+
+[tool.setuptools.package-data]
+src = ["template.nii", "transform_acpc2ctf_icbm.npy"]
+
+[tool.ruff]
+line-length = 79
+exclude = ["src/pca_pycaster.py"]  # vendored from pycaster, kept as upstream
+
+[tool.ruff.lint]
+# Real defects only. The legacy modules do not meet E501/W291 and reflowing
+# them would bury the substantive diffs.
+select = ["F", "E4", "E7", "E9", "W6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: end-to-end runs of the full pipeline (deselect with '-m \"not slow\"')",
+]

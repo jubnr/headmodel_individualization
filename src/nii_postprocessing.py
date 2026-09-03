@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 import os
 from os.path import join as pth
-from shutil import copyfile
 import nibabel as nib
-import gzip, shutil
+import gzip
+import shutil
 from src.cedalion_geometry_segmentation import segmentation_postprocessing as \
         cgeoseg_seg_postproc
 
@@ -11,7 +11,6 @@ def postprocessing(seg_datadir, num_tissues=4):
     if num_tissues == 6:
         # Current order: 'air', 'scalp', 'skull', 'csf', 'gm', 'wm'
         # postprocessing expects: 'gm', 'wm', 'csf', 'bone', 'skin', 'air'
-        shells = ['air', 'scalp', 'skull', 'csf', 'gm', 'wm']
         mask_files = {
             "gray":  "mask_5.nii",
             "white": "mask_6.nii",
@@ -21,7 +20,6 @@ def postprocessing(seg_datadir, num_tissues=4):
             "air":   "mask_1.nii",
         }
     elif num_tissues == 5:
-        shells = ['air', 'scalp', 'skull', 'csf', 'whitegray']
         mask_files = {
             "whitegray": "mask_5.nii",
             "csf":       "mask_4.nii",
@@ -33,7 +31,6 @@ def postprocessing(seg_datadir, num_tissues=4):
         # Adding here "air mask" is a little trick to be able to use
         # the labelUnassigned option of the postprocessing since the tri2nii is
         # not working perfectly and there are a lot of unassigned voxels
-        shells = ['air', 'scalp', 'skull', 'csf', 'cortex']
         mask_files = {
             "cortex": "mask_4.nii",
             "csf":    "mask_3.nii",

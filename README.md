@@ -65,7 +65,10 @@ in the right or by any other mesh manipulation software.<br>
 ### 5. Picking fiducials
 <img align="right" width="360" src="img/MeshLab_fiducial_picking.gif">
 
-- For example in [MeshLab](https://www.meshlab.net/), see on the right.
+- For example in [MeshLab](https://www.meshlab.net/), see on the right.<br>
+  Save the picks with `File -> Export Picked Points` next to the scan, as `<scan>.pp` —<br>
+  PCAwarp finds that file on its own, so there is nothing to retype. Name the three<br>
+  points NAS, LPA and RPA; unnamed points are read in picking order (NAS, LPA, RPA).
 - Or in [cedalion](https://doc.ibs.tu-berlin.de/cedalion/doc/dev/examples/head_models/41_photogrammetric_optode_coregistration.html), automatic detection of marked the fiducials<br>
 with colored stickers (manual correction possible).
 - Or in [FieldTrip](https://www.fieldtriptoolbox.org/), by loading and plotting the mesh and simply <br>
@@ -86,11 +89,27 @@ pip install -r requirements.txt
 ```
 The script `PCAwarp.py` shows how to start the PCAwarp individualization algorithm. This is based on a low-dimensional representation (PCA) of head shape surface meshes trained on an equally segmented and triangulated MRI database of 316 subjects. Warping is done by finding weights for the PCs by minimizing the shape difference between electrodes / scalp proxies and fitted scalp. Exemplary call:<br>
 ```
-python PCAwarp.py -scalp data/photogrammetry_test_data/cutscan.obj 
+python PCAwarp.py -scalp data/photogrammetry_test_data/cutscan.obj
+```
+The landmarks are picked up automatically from a file sitting next to the scalp file — a MeshLab `.pp`, a 3D Slicer `.mrk.json` or `.fcsv`, or a text file with one `LABEL x y z` line per landmark, named after the scan (`cutscan.pp`) or simply `fiducials.txt`. Point at one explicitly with `-fiducials`, or type the coordinates in as before:<br>
+```
+python PCAwarp.py -scalp data/photogrammetry_test_data/cutscan.obj
                   -nas   144.482786 129.291732 380.645666
                   -lpa   154.618663 59.192534 488.364463
                   -rpa   80.580458 21.190605 362.990298
 ```
+Two things are checked before anything is warped, because both are silent killers: the scalp file is rescaled to mm if it was exported in metres or centimetres, and the landmarks are rejected if their spacing is not that of a human head (a mesh picker's vertex *indices* pasted in place of coordinates are recognised and looked up instead).<br>
+
+Useful options:<br>
+| flag | default | what it does |
+|---|---|---|
+| `--n-points` | 100 | how many scalp proxy points the warp is fitted to |
+| `--sampling` | `fps` | `fps` picks them by farthest-point sampling (deterministic, even coverage); `random` is the old behaviour and needs `--seed` to repeat |
+| `--seed` | – | seed for `--sampling random` |
+| `--no-qc-gate` | off | export the model even if the quality checks fail |
+| `--regularize` | off | experimental: penalize shells coming closer than 5 mm during the fit |
+<br>
+
 It contains the following steps:
 <img align="right" width="300" src="img/PCAwarped_meshes.png">
 
@@ -98,12 +117,15 @@ It contains the following steps:
 proxy points into the [CTF-coordinate system](https://www.fieldtriptoolbox.org/faq/coordsys/), since the<br> 
 database on which the PCA was applied lives in CTF space.
 * Cut the input scalp proxy mesh above the ears.
-* Decimate the input scalp proxy mesh to reduce the number<br>
-of vertices used for computing the shape difference.
+* Reduce the input scalp proxy to `--n-points` points by<br>
+farthest-point sampling, to keep the shape-difference<br>
+computation cheap without losing coverage.
 * PCA warping, parameters are: number of PCs used for <br>
 reconstruction, regularizer type (if meshes are intersecting).
 * Transform back from CTF in original input space.
 * Save surface meshes.
+
+**Known limitation.** The HArtMuT PCA basis (`data/pcas_hartmut`, used when `HARTMUT = True`) ships without a cortex block, so the cortex cannot be fitted to the scalp. It is instead moved with the csf surface it sits inside — an approximation that keeps the shells nested, but the innermost surface is not individualized. Set `HARTMUT = False` to use `data/pcas`, which does carry cortex variance.
 
 **Supported input file formats (scalp proxy):**
 * Any [trimesh](https://trimesh.org/) supported mesh format like .stl, .obj, .ply, ....
@@ -120,7 +142,31 @@ reconstruction, regularizer type (if meshes are intersecting).
 * .npy as simple dictionary containing the 4 output meshes.
 * .nii segmentation masks for [cedalion](https://doc.ibs.tu-berlin.de/cedalion/doc/dev/).
 
+### 7. Check the result
+Every run measures its own output and writes `qc.json` and `qc.png` next to the meshes, then refuses to export a model that fails. The headline number is the scalp fit residual against the **full** input cloud, next to the same residual for the unwarped template — a warp that does not beat the population mean has not worked, however plausible the surfaces look:<br>
+```
+Quality control...
+  scalp fit vs 9443 scan points: median 1.52 mm, p95 7.67 mm, max 12.76 mm
+    unwarped template baseline:          median 4.52 mm, p95 13.72 mm   (3.0x better)
+  shell        volume  watertight  euler   gap to outer
+  scalp      4281.4 cm3        True      2
+  skull      2037.1 cm3        True      2        0.77 mm
+  csf        1525.2 cm3        True      2        0.05 mm
+  cortex     1027.8 cm3        True      2        0.50 mm
+  QC passed.
+```
+`qc.json` also records the fitted PC weights, how much of each shell fits inside the exported volume, and the provenance of the run (input file, resolved fiducials and where they came from, unit scaling, sampling, git SHA). Hard failures — a surface that is not watertight, shells that cross, or a fit no better than the template — stop the run; `--no-qc-gate` overrides.<br>
+<br>
+
 **Need more support/interfaces? Please contact me or open an issue on GitHub.**<br>
+
+## Development
+```
+pip install -e ".[dev]"
+pytest -m "not slow"    # unit tests, about a second
+pytest -m slow          # full pipeline on the shipped test scan, several minutes
+ruff check .
+```
 
 
 

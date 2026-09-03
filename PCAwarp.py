@@ -4,11 +4,15 @@ import argparse
 import numpy as np
 from os.path import join as pth
 
-from src.tri_io import write_tri, load_tri
+from src.tri_io import write_tri, orient_outward
 from src.transform_to_ctf import transform_to_ctf, apply_transform
-from src.pca_warp import shortest_dist, elec_warp
+from src.pca_warp import (shortest_dist, elec_warp, degenerate_shells,
+                          transfer_displacement, enforce_nesting)
 from src.tri2nii import tri2nii
 from src.nii_postprocessing import postprocessing
+from src import fiducials as fid_io
+from src.sampling import subsample, coverage
+from src import qc as qc_mod
 
 
 BASEDIR = os.path.dirname(os.path.realpath(__file__))
@@ -48,12 +52,16 @@ MEAN_HEAD = pth(BASEDIR, 'data', pca_dir, 'mean_head.npy')
 STD_DEV = pth(BASEDIR, 'data', pca_dir, 'std_dev.npy')
 SHELLS = ['scalp', 'skull', 'csf', 'cortex']
 
+# Which shell a non-individualizable one borrows its displacement from. Only
+# valid between shells sharing a triangulation.
+FALLBACK_DONOR = {'cortex': 'csf'}
+
 
 
 # =====================
 # Core Functions
 # =====================
-def pca_surfacemesh_warping(fiducials, optodes):
+def pca_surfacemesh_warping(fiducials, optodes, regularize=False):
     """Perform PCA-based surface mesh warping."""
     mean_bnd = np.load(MEAN_HEAD, allow_pickle=True).item()
     std_dev = np.load(STD_DEV, allow_pickle=True)
@@ -67,7 +75,34 @@ def pca_surfacemesh_warping(fiducials, optodes):
     _, min_dist = shortest_dist(mean_pnt, mean_bnd['scalp'][0])
     mean_pnt[2] = np.max(mean_bnd['scalp'][0][:, 2]) - min_dist
 
-    return elec_warp(optodes, pcas, mean_bnd, std_dev)
+    bnd_w, x_p = elec_warp(optodes, pcas, mean_bnd, std_dev,
+                           regularize=regularize)
+
+    # Shells with an all-zero PCA block come back at the template mean. The
+    # HArtMuT basis has this for the cortex; left alone it would be crossed by
+    # the csf surface, which does warp. Carry the csf displacement over
+    # instead - the two shells share a triangulation and a radial vertex
+    # correspondence - and say so, because that cortex is not a fit.
+    for shell in degenerate_shells(pcas, mean_bnd):
+        donor = FALLBACK_DONOR.get(shell)
+        if donor is not None and donor in bnd_w:
+            print(f'  {shell}: PCA block in {pca_dir} carries no variance; '
+                  f'following the {donor} warp instead (approximation, not a '
+                  f'fit to the scalp).')
+            bnd_w[shell] = transfer_displacement(bnd_w, mean_bnd, donor, shell)
+            bnd_w[shell], moved = enforce_nesting(bnd_w, donor, shell)
+            if moved:
+                print(f'  {shell}: pulled {moved} vertices back inside '
+                      f'{donor}.')
+        else:
+            print(f'  WARNING: {shell}: PCA block in {pca_dir} carries no '
+                  f'variance, this shell stays at the template mean.')
+
+    # The database is wound inwards; every consumer (OpenMEEG, FieldTrip, MNE)
+    # wants outward normals.
+    bnd_w = {shell: (pos, orient_outward(pos, tris))
+             for shell, (pos, tris) in bnd_w.items()}
+    return bnd_w, x_p
 
 
 def load_scalp_file(filepath, nas, lpa, rpa):
@@ -144,9 +179,88 @@ def _load_elc(filepath, nas, lpa, rpa):
 def _load_mesh(filepath):
     try:
         import trimesh
-        return np.array(trimesh.load(filepath).vertices)
+        mesh = trimesh.load(filepath, force='mesh')
+        return np.array(mesh.vertices)
     except Exception as e:
         raise RuntimeError(f'Could not load scalp file: {e}')
+
+
+def raw_vertices(filepath):
+    """Vertices of a mesh file in file order, or None if it is not a mesh.
+
+    Mesh pickers report indices into this list, so index-shaped fiducials are
+    resolved against it rather than against whatever trimesh returns after
+    merging and reordering.
+    """
+    if filepath.lower().endswith('.obj'):
+        verts = [[float(v) for v in line.split()[1:4]]
+                 for line in open(filepath) if line.startswith('v ')]
+        return np.array(verts, dtype=float) if verts else None
+    try:
+        import trimesh
+        mesh = trimesh.load(filepath, force='mesh', process=False)
+        return np.asarray(mesh.vertices, dtype=float)
+    except Exception:
+        return None
+
+
+
+# =====================
+# Fiducials
+# =====================
+def resolve_fiducials(args, scalp_path):
+    """Work out NAS, LPA and RPA without making the user retype them.
+
+    Order of preference: what was passed on the command line, then an explicit
+    -fiducials file, then a landmark file sitting next to the scalp file
+    (MeshLab .pp, Slicer .mrk.json/.fcsv, plain text). Values that are really
+    vertex indices are recognised and looked up.
+    """
+    verts = raw_vertices(scalp_path)
+    given = {'nas': args.nas, 'lpa': args.lpa, 'rpa': args.rpa}
+
+    if all(v is not None for v in given.values()):
+        out = {}
+        for name, value in given.items():
+            picked = fid_io.as_vertex_indices(value, verts)
+            if picked is not None:
+                print(f'  {name.upper()}: {[int(v) for v in value]} are vertex '
+                      f'indices, not coordinates - using the picked vertices at '
+                      f'{np.round(picked, 2).tolist()}.')
+                out[name] = picked
+            else:
+                out[name] = np.asarray(value, dtype=float)
+        return np.array([out['nas'], out['lpa'], out['rpa']]), 'command line'
+
+    if args.fiducials:
+        if not os.path.isfile(args.fiducials):
+            raise FileNotFoundError(f'No such fiducial file: {args.fiducials}')
+        print(f'  reading landmarks from {args.fiducials}')
+        return fid_io.read_fiducial_file(args.fiducials), args.fiducials
+
+    found = fid_io.find_fiducial_file(scalp_path)
+    if found:
+        print(f'  found landmarks next to the scalp file: {found}')
+        return fid_io.read_fiducial_file(found), found
+
+    raise ValueError(
+        'No fiducials. Give them with -nas/-lpa/-rpa, point -fiducials at a '
+        'landmark file, or drop one next to the scalp file - a MeshLab .pp, a '
+        'Slicer .mrk.json/.fcsv, or a text file with one "LABEL x y z" line '
+        f'per landmark, named e.g. '
+        f'{os.path.splitext(os.path.basename(scalp_path))[0]}.pp.')
+
+
+def to_millimetres(scalp, fiducials):
+    """Put the scalp proxy and its landmarks into mm, whatever they arrived in.
+
+    The PCA database is in mm; a scan exported in metres would otherwise be
+    warped to as if it were a 24 mm head.
+    """
+    scale, unit = fid_io.guess_scale_to_mm(scalp)
+    if scale != 1.0:
+        print(f'  scalp proxy looks like {unit}, scaling by {scale:g} to mm')
+    return scalp * scale, np.asarray(fiducials, dtype=float) * scale, scale
 
 
 
@@ -267,15 +381,14 @@ def export_npy(bnd_w, transform, output_dir):
 def export_cedalion(bnd_w, transform, fiducials, output_dir):
     print('Start cedalion export...')
     # Transform again into ctf and then into RAS (this is necessary for tri2nii)
+    # Build the RAS copy locally: bnd_w belongs to the caller, which still
+    # needs the digitized-frame vertices for the MNE export afterwards.
     ras2ctf = np.load(ACPC2CTF, allow_pickle=True).astype(float)
     ras2ctf[:3,3] *= 1000 # m -> mm
     ctf2ras = np.linalg.pinv(ras2ctf)
-    for shell in SHELLS:
-        bnd_w[shell] = (apply_transform(transform, bnd_w[shell][0]),
-                        bnd_w[shell][1])
-        bnd_w[shell] = (apply_transform(ctf2ras, bnd_w[shell][0]),
-                        bnd_w[shell][1])
-    bnds = [(bnd_w[shell][0], bnd_w[shell][1]) for shell in SHELLS]
+    dig2ras = ctf2ras @ transform  # first to ctf, then ctf2ras
+    bnds = [(apply_transform(dig2ras, bnd_w[shell][0]), bnd_w[shell][1])
+            for shell in SHELLS]
     cedalion_output_dir = pth(output_dir, 'cedalion')
     os.makedirs(cedalion_output_dir, exist_ok=True)
 
@@ -287,7 +400,7 @@ def export_cedalion(bnd_w, transform, fiducials, output_dir):
     """
     back_transform = np.eye(4) #for RAS
     tri2nii(bnds, output_dir=cedalion_output_dir, transform=back_transform,
-            t1_fn='src/template.nii', meshes='all')
+            t1_fn=pth(BASEDIR, 'src', 'template.nii'), meshes='all')
 
     # Postprocessing and clean up
     postprocessing(cedalion_output_dir, num_tissues=4)
@@ -330,7 +443,24 @@ def export_cedalion(bnd_w, transform, fiducials, output_dir):
                               "w"), indent=2)
 
 
+def _to_lia(data, affine):
+    """Reorient a volume to the LIA voxel order FreeSurfer .mgz files use."""
+    from nibabel.orientations import (io_orientation, axcodes2ornt,
+                                      ornt_transform, apply_orientation,
+                                      inv_ornt_aff)
+    xf = ornt_transform(io_orientation(affine), axcodes2ornt(('L', 'I', 'A')))
+    return (apply_orientation(data, xf),
+            affine @ inv_ornt_aff(xf, data.shape))
+
+
 def export_mne(bnd_w, transform, output_dir):
+    """Write an MNE subject directory: bem/*.surf, mri/T1.mgz and a trans.
+
+    MNE reads bem/*.surf as FreeSurfer surface RAS in mm and expects the
+    head->mri transform in metres, so the surfaces are moved out of the
+    digitized frame into the surface RAS of the T1 we just wrote, and the
+    transform is scaled on the way out.
+    """
     print('Start python-MNE export...')
     try:
         import nibabel as nib
@@ -347,11 +477,6 @@ def export_mne(bnd_w, transform, output_dir):
                  'skull': 'outer_skull.surf',
                  'csf': 'inner_skull.surf',
                  'cortex': 'inner_csf.surf'}
-    for shell in SHELLS:
-        nib.freesurfer.io.write_geometry(pth(mne_output_dir, 'bem',
-                                             mne_names[shell]),
-                                         bnd_w[shell][0],
-                                         bnd_w[shell][1])
 
     # Create a fake T1.mgz file from the cedalion output (for MNE plotting)
     data = nib.load(pth(output_dir, 'cedalion', 'mask_skin.nii')).get_fdata()
@@ -363,16 +488,37 @@ def export_mne(bnd_w, transform, output_dir):
     for lab, tissue in enumerate(['skin', 'bone', 'csf', 'cortex']):
         mask = nib.load(pth(output_dir, 'cedalion', f"mask_{tissue}.nii"))
         new_data[mask.get_fdata() == 1] = tissue_color[tissue]
-    new_img = nib.nifti1.Nifti1Image(new_data, mask.affine, mask.header)
-    nib.save(new_img, pth(mne_output_dir, 'mri', 'T1.mgz'))
+    # FreeSurfer volumes are stored LIA, and that is what nibabel and MNE
+    # assume when they derive the surface RAS ("tkreg") frame from an .mgz.
+    # The masks come out of tri2nii in RAS order, so reorient before saving -
+    # left as RAS, get_vox2ras_tkr() would describe a mirrored head.
+    new_data, t1_affine = _to_lia(new_data, mask.affine)
+    t1_fn = pth(mne_output_dir, 'mri', 'T1.mgz')
+    nib.save(nib.freesurfer.mghformat.MGHImage(
+        new_data.astype(np.float32), t1_affine), t1_fn)
 
-    # Transform object for coregistration
+    # digitized -> the surface RAS of that volume
     ras2ctf = np.load(ACPC2CTF, allow_pickle=True).astype(float)
     ras2ctf[:3,3] *= 1000 # m -> mm
     ctf2ras = np.linalg.pinv(ras2ctf)
-    ditigized2ras = ctf2ras @ transform # first to ctf, then ctf2ras
-    trans = Transform('head', 'mri', ditigized2ras)
-    mne.write_trans(pth(mne_output_dir, 'ditigized2ras-trans.fif'), trans)
+    t1 = nib.load(t1_fn)
+    ras2tkr = t1.header.get_vox2ras_tkr() @ np.linalg.inv(t1.affine)
+    ditigized2tkr = ras2tkr @ ctf2ras @ transform
+
+    for shell in SHELLS:
+        pos = apply_transform(ditigized2tkr, bnd_w[shell][0])
+        nib.freesurfer.io.write_geometry(pth(mne_output_dir, 'bem',
+                                             mne_names[shell]),
+                                         pos,
+                                         orient_outward(pos, bnd_w[shell][1]))
+
+    # Transform object for coregistration. MNE works in metres, so only the
+    # translation column changes; the rotation is scale free.
+    trans_m = ditigized2tkr.copy()
+    trans_m[:3, 3] /= 1000.
+    trans = Transform('head', 'mri', trans_m)
+    mne.write_trans(pth(mne_output_dir, 'ditigized2ras-trans.fif'), trans,
+                    overwrite=True)
 
 
 
@@ -385,52 +531,139 @@ def main():
                         help='Path to scalp proxy file. Can be a .npy- or a \
                               .txt-file or a surface mesh of typical mesh \
                               formats like .stl, .obj, .ply')
+    parser.add_argument('-fiducials', type=str, default=None,
+                        help='Path to a landmark file holding NAS, LPA and \
+                              RPA: MeshLab .pp, 3D Slicer .mrk.json/.fcsv, or \
+                              a text file with one "LABEL x y z" line per \
+                              landmark. Omit it and a landmark file sitting \
+                              next to the scalp file is picked up \
+                              automatically.')
     parser.add_argument('-nas', type=float, nargs=3, default=None,
-                        help='Nasion (NAS) fiducial coordinates.')
+                        help='Nasion (NAS) fiducial coordinates. Optional; \
+                              overrides the landmark file.')
     parser.add_argument('-lpa', type=float, nargs=3, default=None,
                         help='Left preauricular (LPA) fiducial coordinates.')
     parser.add_argument('-rpa', type=float, nargs=3, default=None,
                         help='Right preauricular (RPA) fiducial coordinates.')
+    parser.add_argument('--n-points', type=int, default=100,
+                        help='Number of scalp proxy points the warp is \
+                              fitted to (default 100).')
+    parser.add_argument('--sampling', choices=['fps', 'random'],
+                        default='fps',
+                        help='How to pick those points. "fps" \
+                              (farthest-point, the default) is deterministic \
+                              and spreads them evenly; "random" reproduces \
+                              the old behaviour and needs --seed to be \
+                              reproducible at all.')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Seed for --sampling random. Unused by fps, \
+                              which is deterministic without one.')
+    parser.add_argument('--no-qc-gate', action='store_true',
+                        help='Export the head model even if the quality \
+                              checks fail. qc.json is written either way.')
+    parser.add_argument('--regularize', action='store_true',
+                        help='EXPERIMENTAL. Penalize shells coming closer \
+                              than 5 mm during the fit. Roughly 10x slower, \
+                              and the penalty is unweighted against the shape \
+                              distance, so it can dominate and blow the fit \
+                              up. Off by default.')
     args = parser.parse_args()
 
     scalp, nas, lpa, rpa = load_scalp_file(args.scalp, args.nas, args.lpa,
                                            args.rpa)
-    if nas is None or lpa is None or rpa is None:
-        raise ValueError('Fiducials (nas, lpa, rpa) must be provided.')
+    print('Locating fiducials...')
+    if nas is not None and lpa is not None and rpa is not None:
+        # the scalp file carried them itself (CapTrak, Polhemus, .elc)
+        args.nas, args.lpa, args.rpa = nas, lpa, rpa
+    fiducials, fid_source = resolve_fiducials(args, args.scalp)
+
+    scalp, fiducials, unit_scale = to_millimetres(scalp, fiducials)
+    spacing = fid_io.validate(fiducials, fid_source)
+    print('  NAS %s\n  LPA %s\n  RPA %s' % tuple(
+        np.round(f, 2).tolist() for f in fiducials))
+    print('  LPA-RPA %.1f mm, NAS-LPA %.1f mm, NAS-RPA %.1f mm'
+          % (spacing['lpa-rpa'], spacing['nas-lpa'], spacing['nas-rpa']))
 
     print('Transforming into CTF coordinate system...')
     mean_scalp = np.load(MEAN_HEAD, allow_pickle=True).item()['scalp'][0]
-    fiducials = np.array([nas, lpa, rpa])
-    scalp, transform = transform_to_ctf(scalp, *fiducials,
+    scalp, transform = transform_to_ctf(scalp, *fiducials.copy(),
                                         mean_scalp=mean_scalp,
                                         return_transform=True)
-    
+
     print('Cut scalp proxy points above the ears...')
-    CUT = 30#mm 
+    CUT = 30#mm
     scalp = scalp[scalp[:, 2] > CUT]
-    print('Decimate number of scalp proxy points to 100...')
-    if len(scalp) > 100:
-        scalp = scalp[np.random.choice(len(scalp), 100, replace=False)]
+    if len(scalp) < 20:
+        raise ValueError(
+            f'Only {len(scalp)} scalp proxy points survive the cut {CUT} mm '
+            'above the ear plane. The warp has 16 free parameters and needs a '
+            'point cloud spread over the upper head, so it would fit noise. '
+            'Check that the fiducials belong to this scalp file.')
+    spread = float(np.linalg.norm(scalp.max(axis=0) - scalp.min(axis=0)))
+    if spread < 100.0:
+        raise ValueError(
+            f'The scalp proxy spans only {spread:.1f} mm after transforming to '
+            'CTF, which is far too small for a head. Check the units and the '
+            'fiducials of the scalp file.')
+    scalp_full = scalp  # kept for the QC fit residual
+    print(f'Reduce scalp proxy to {args.n_points} points '
+          f'({args.sampling})...')
+    scalp, _ = subsample(scalp, args.n_points, method=args.sampling,
+                         seed=args.seed)
+    print(f'  worst gap from any scan point to a sampled one: '
+          f'{coverage(scalp_full, scalp):.1f} mm')
 
     print('Performing PCA warping...')
-    bnd_w_ctf, _ = pca_surfacemesh_warping(fiducials, scalp)
+    bnd_w_ctf, pc_weights = pca_surfacemesh_warping(
+        fiducials, scalp, regularize=args.regularize)
 
     output_dir = os.path.dirname(args.scalp)
     inv = np.linalg.pinv(transform)  # CTF -> input frame
 
+    # Measure the warp before spending two minutes exporting it. A run that
+    # does not beat the unwarped template has not worked, however plausible
+    # the meshes look.
+    print('Quality control...')
+    qc_report, qc_problems = qc_mod.run(
+        bnd_w_ctf, scalp_full, template_scalp=(mean_scalp,
+                                               np.load(MEAN_HEAD,
+                                                       allow_pickle=True
+                                                       ).item()['scalp'][1]),
+        x_p=pc_weights, output_dir=output_dir, basedir=BASEDIR,
+        provenance={'scalp_file': os.path.abspath(args.scalp),
+                    'fiducials': np.asarray(fiducials).tolist(),
+                    'fiducial_source': fid_source,
+                    'unit_scale_to_mm': unit_scale,
+                    'n_points': int(args.n_points),
+                    'sampling': args.sampling,
+                    'seed': args.seed,
+                    'num_pcas': NUM_PCAS,
+                    'hartmut': HARTMUT,
+                    'regularize': bool(args.regularize)})
+    print(qc_mod.summary(qc_report))
+    if qc_problems:
+        print('\n  QC FAILED:')
+        for problem in qc_problems:
+            print(f'    - {problem}')
+        print(f'  See {pth(output_dir, "qc.json")} and qc.png.')
+        if not args.no_qc_gate:
+            raise SystemExit('Refusing to export a head model that failed QC. '
+                             'Pass --no-qc-gate to export it anyway.')
+        print('  --no-qc-gate given, exporting anyway.')
+    else:
+        print('  QC passed.')
+
     # Warp the HArtMuT artefact sources (muscle, eyes) into the individual head.
     # Only for the HArtMuT PCAs, the artefact model lives in their template.
     eye_pos = None
-    hartmut = None
     eye_ctf_export = None
     hartmut_ctf = None
     if HARTMUT:
         print('Warping HArtMuT artefact sources into the individual head...')
         new_pos_ctf, eye_ctf, model = warp_artefacts_ctf(bnd_w_ctf)
-        new_pos = apply_transform(inv, new_pos_ctf)
         eye_pos = apply_transform(inv, eye_ctf) if len(eye_ctf) else None
-        hartmut = (new_pos, model)
         eye_ctf_export = eye_ctf if len(eye_ctf) else None
+        # the artefact model is exported once, alongside the CTF head
         hartmut_ctf = (new_pos_ctf, model)
 
     print('Back-transform warped boundaries...')
@@ -462,6 +695,26 @@ def main():
     export_npy(bnd_w, transform, output_dir)
     export_cedalion(bnd_w, transform, fiducials, output_dir)
     export_mne(bnd_w, transform, output_dir)
+
+    # The mask volume only exists once cedalion has run, so the field-of-view
+    # check is folded into qc.json afterwards.
+    ras2ctf_fov = np.load(ACPC2CTF, allow_pickle=True).astype(float)
+    ras2ctf_fov[:3, 3] *= 1000
+    bnd_ras = {shell: (apply_transform(np.linalg.pinv(ras2ctf_fov),
+                                       bnd_w_ctf[shell][0]),
+                       bnd_w_ctf[shell][1]) for shell in SHELLS}
+    fov = qc_mod.field_of_view(bnd_ras, pth(output_dir, 'cedalion',
+                                            'mask_skin.nii'))
+    if fov is not None:
+        qc_report['field_of_view_fraction'] = fov
+        worst_shell, worst = min(fov.items(), key=lambda kv: kv[1])
+        if worst < 0.999:
+            print(f'  NOTE: {100 * (1 - worst):.0f}% of the {worst_shell} '
+                  f'falls outside the exported mask volume and is clipped '
+                  f'from the .nii masks and T1.mgz.')
+        import json as _json
+        with open(pth(output_dir, 'qc.json'), 'w') as fid:
+            _json.dump(qc_report, fid, indent=2)
 
 
 
