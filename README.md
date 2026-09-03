@@ -72,10 +72,24 @@ in the right or by any other mesh manipulation software.<br>
 ### 5. Picking fiducials
 <img align="right" width="360" src="img/MeshLab_fiducial_picking.gif">
 
-- For example in [MeshLab](https://www.meshlab.net/), see on the right.<br>
-  Save the picks with `File -> Export Picked Points` next to the scan, as `<scan>.pp` —<br>
-  PCAwarp finds that file on its own, so there is nothing to retype. Name the three<br>
-  points NAS, LPA and RPA; unnamed points are read in picking order (NAS, LPA, RPA).
+**The easy way — no MeshLab needed:**
+```
+python tools/pick_fiducials.py path/to/cutscan.obj
+```
+Left-click nasion, then left pre-auricular, then right pre-auricular. `u` undoes, `r` resets,
+`q` saves and quits. It writes `<scan>.pp` right where PCAwarp looks for it, and prints the
+three inter-landmark distances so a mis-click is obvious before you spend a run on it.<br>
+<br>
+
+**Or in MeshLab**, see on the right. Two things catch people out:<br>
+  1. Picked points are **not** written to disk until you press **Save** in the PickPoints
+     dialog — closing the dialog silently discards them. Save as `<scan>.pp` next to the scan.
+  2. If clicking the mesh registers nothing at all, it is usually the compositor: MeshLab
+     picks by reading the OpenGL depth buffer, which misbehaves on Wayland. Launch it through
+     XWayland instead — `QT_QPA_PLATFORM=xcb ./MeshLab*.AppImage`.
+
+  Name the three points NAS, LPA and RPA; unnamed points are read in picking order
+  (NAS, LPA, RPA).
 - Or in [cedalion](https://doc.ibs.tu-berlin.de/cedalion/doc/dev/examples/head_models/41_photogrammetric_optode_coregistration.html), automatic detection of marked the fiducials<br>
 with colored stickers (manual correction possible).
 - Or in [FieldTrip](https://www.fieldtriptoolbox.org/), by loading and plotting the mesh and simply <br>
