@@ -111,7 +111,7 @@ clicking on the fiducials and writing the coordinates down:
 
 ```
 # Clone this repository and its HArtMuT companion side by side
-git clone https://github.com/harmening/headmodel_individualization
+git clone https://github.com/jubnr/headmodel_individualization
 git clone https://github.com/harmening/HArtMuT
 cd headmodel_individualization
 pip install -e .            # or: pip install -r requirements.txt
