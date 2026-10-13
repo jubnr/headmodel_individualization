@@ -197,9 +197,11 @@ def find_fiducial_file(scalp_path):
     candidates += ['landmarks' + ext for ext in FIDUCIAL_EXTS]
     candidates += ['picked_points.pp', 'landmarks.mrk.json']
 
+    # A .txt/.csv scalp proxy matches its own <stem>.txt; never pick it.
+    scalp_abs = os.path.abspath(scalp_path)
     for name in candidates:
         path = os.path.join(folder, name)
-        if os.path.isfile(path):
+        if os.path.isfile(path) and os.path.abspath(path) != scalp_abs:
             return path
 
     loose = sorted(f for f in os.listdir(folder) if f.lower().endswith('.pp'))
@@ -256,16 +258,23 @@ def as_vertex_indices(value, vertices):
     return picked.mean(axis=0)
 
 
-def validate(fiducials, source=''):
-    """Raise if the three landmarks cannot belong to one human head (mm)."""
+def validate(fiducials, source='', plausible=None):
+    """Raise if the three landmarks cannot belong to one human head (mm).
+
+    `plausible` maps each spacing to a (low, high) range in mm and defaults to
+    the adult PLAUSIBLE_MM; the infant path passes ranges scaled to its
+    template.
+    """
+    if plausible is None:
+        plausible = PLAUSIBLE_MM
     nas, lpa, rpa = np.asarray(fiducials, dtype=float)
     got = {'lpa-rpa': np.linalg.norm(lpa - rpa),
            'nas-lpa': np.linalg.norm(nas - lpa),
            'nas-rpa': np.linalg.norm(nas - rpa)}
-    bad = [f'{k} = {v:.1f} mm (expected {PLAUSIBLE_MM[k][0]:.0f}-'
-           f'{PLAUSIBLE_MM[k][1]:.0f} mm)'
+    bad = [f'{k} = {v:.1f} mm (expected {plausible[k][0]:.0f}-'
+           f'{plausible[k][1]:.0f} mm)'
            for k, v in got.items()
-           if not PLAUSIBLE_MM[k][0] <= v <= PLAUSIBLE_MM[k][1]]
+           if not plausible[k][0] <= v <= plausible[k][1]]
     if bad:
         raise ValueError(
             'Implausible fiducials' + (f' from {source}' if source else '')

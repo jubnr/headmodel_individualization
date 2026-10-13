@@ -2,9 +2,10 @@
 
 > **This is a fork of [harmening/headmodel_individualization](https://github.com/harmening/headmodel_individualization).**
 > The algorithm and the PCA bases are unchanged. What this fork adds is everything around them:
-> automatic fiducial handling, a quality-control gate on every run, reproducible output, and a
-> roughly 3x faster pipeline. See [Changes in this fork](#changes-in-this-fork) for the full list
-> and the reasoning.
+> automatic fiducial handling, a quality-control gate on every run, reproducible output, a
+> roughly 3x faster pipeline, and a separate path for **infants** (2 weeks – 2 years), which the
+> adult PCA cannot represent — see [8. Infants](#8-infants-2-weeks--2-years). See
+> [Changes in this fork](#changes-in-this-fork) for the full list and the reasoning.
 
 **The presented PCAwarp algorithm estimates individual head anatomies based on a large database of heads when structural MRI/CT scans are unavailable using scalp data from photogrammetry or digitized electrode positions. The final surfaces meshes can be used to construct a BEM volume conduction head model for source reconstruction with e.g. [OpenMEEG](https://openmeeg.github.io/).<br>
 In our related scientific publication ["Data-driven head model individualization from digitized electrode positions or photogrammetry improves M/EEG source localization accuracy"](https://direct.mit.edu/imag/article/doi/10.1162/IMAG.a.1073/134446) we demonstrate that our individualized PCAwarp head model outperformes any other head model in terms of source localization error (synthetic EEG data, SNR=10):**
@@ -201,13 +202,40 @@ Quality control...
 `qc.json` also records the fitted PC weights, how much of each shell fits inside the exported volume, and the provenance of the run (input file, resolved fiducials and where they came from, unit scaling, sampling, git SHA). Hard failures — a surface that is not watertight, shells that cross, or a fit no better than the template — stop the run; `--no-qc-gate` overrides.<br>
 <br>
 
+### 8. Infants (2 weeks – 2 years)
+The PCA bases were trained on adult MRIs, and an infant head lies outside them, both in its outer shape and in how the skull and CSF sit under the scalp. For infants, `infantwarp.py` therefore does not use the PCA. It takes the [infant MRI template](https://mne.tools/stable/generated/mne.datasets.fetch_infant_template.html) of the right age (O'Reilly et al. 2021, built on the Richards et al. 2016 database) and deforms it onto the scan:
+```
+python infantwarp.py -scalp path/to/infant_scan.obj --age 6mo
+```
+`--age` is one of `2wk 1mo 2mo 3mo 4.5mo 6mo 7.5mo 9mo 10.5mo 12mo 15mo 18mo 2yr`. For infants born preterm, use their corrected age. The template is downloaded on first use (about 600 MB per age) to `~/mne_data/infant`; `--subjects-dir` overrides that location. Input formats and fiducial handling are the same as for `PCAwarp.py`.
+
+The steps:
+* Put the scan and the template into the CTF frame using their own NAS/LPA/RPA.
+* Fit an affine to the scan points by ICP. This takes care of head size and proportions.
+* Interpolate the remaining scalp mismatch with a smoothed thin-plate spline (`--smoothing`) and apply it to all three shells. The template's scalp→skull→brain distances are carried along with the scalp, not refitted. Scalp below the ear-plane cut is pinned in place, so the face and neck are not extrapolated.
+* Pull back apart any shells that came to touch, then run the same QC gate as the adult path.
+
+The output is a **3-shell BEM** (scalp = outer skin, skull = outer skull, csf = inner skull) in `infantwarp_<age>/` next to the scan: OpenMEEG `.tri`/`.stl`, FieldTrip `.mat` (digitized and CTF frames), `.npy`, and an MNE subject directory (`mne/infantwarp`) whose `T1.mgz` is the *template's*, for orientation only. The fiducial-spacing check and the ear-plane cut are scaled to the template rather than to an adult head. The MNI head and the cedalion masks are not exported, because both rest on an adult template.
+
+**Limitations.**
+* The inner shells come from the template, deformed along with the scalp. They are not measured, and QC can only check the scalp fit and the mesh geometry.
+* A closed-skull BEM cannot represent fontanelles or open sutures. For newborns and young infants, where these strongly affect the EEG, consider an FEM model.
+* The infant skull is thinner and conducts more than an adult's, so choose the conductivities accordingly.
+* If the scan covers only the top of the head, the head's height is poorly constrained. The affine stretch is printed and stored in `qc.json`; a stretch beyond ±20% usually means the wrong age, units or fiducials.
+
+If you use the infant path, please also cite the templates:
+O'Reilly, C., Larson, E., Richards, J. E., & Elsabbagh, M. (2021). Structural templates for imaging EEG cortical sources in infants. *NeuroImage*, 227, 117682. [doi:10.1016/j.neuroimage.2020.117682](https://doi.org/10.1016/j.neuroimage.2020.117682)<br>
+Richards, J. E., Sanchez, C., Phillips-Meek, M., & Xie, W. (2016). A database of age-appropriate average MRI templates. *NeuroImage*, 124, 1254–1259. [doi:10.1016/j.neuroimage.2015.04.055](https://doi.org/10.1016/j.neuroimage.2015.04.055)<br>
+<br>
+
 **Need more support/interfaces? Please contact me or open an issue on GitHub.**<br>
 
 ## Development
 ```
 pip install -e ".[dev]"
-pytest -m "not slow"    # unit tests, about a second
-pytest -m slow          # full pipeline on the shipped test scan, several minutes
+pytest -m "not slow"    # unit tests, a few seconds
+pytest -m slow          # full pipelines, several minutes; the infant test downloads
+                        # the 6-month template (~600 MB) to ~/mne_data/infant once
 ruff check .
 ```
 
@@ -233,6 +261,16 @@ against 4.5 mm for the unwarped template). It exited 0 and said nothing.
 * A scan in **metres or centimetres** is rescaled to mm automatically.
 * Landmark spacing outside human range is **refused**, printing the offending distances, and a
   scalp cloud that collapses after the CTF transform stops the run instead of being fitted.
+* A `.txt` scalp proxy is no longer mistaken for its own landmark file (`scan.txt` matched the
+  `<stem>.txt` lookup and was read as 1000s of unlabelled fiducials).
+
+### Infant head models
+`infantwarp.py` builds a 3-shell BEM for infants from the same inputs. The PCA bases are adult
+and cannot reach an infant head, so it deforms the age-matched infant MRI template of O'Reilly
+et al. (2021) onto the scan instead — affine ICP, then a smoothed thin-plate spline applied to all
+shells — and runs it through the same QC gate. Landmark-spacing limits and the ear-plane cut are
+scaled to the template instead of an adult head (the 6-month template's 109 mm LPA–RPA would fail
+the adult check). Usage and limitations in [section 8](#8-infants-2-weeks--2-years).
 
 ### Every run checks its own output
 `src/qc.py` writes `qc.json` and `qc.png` beside the meshes and **refuses to export a model that
@@ -292,13 +330,13 @@ subject directory now, and the `head→mri` transform round-trips onto `outer_sk
 * `scipy` was imported but missing from `requirements.txt`, so a clean install could not run the
   pipeline at all. `scikit-learn`, `tqdm` and `nilearn` were listed or imported but unused and are
   gone. Added `pyproject.toml` so `pip install -e .` works.
-* 69 tests (65 fast, 4 marked `slow`) and a GitHub Actions run. There were none.
+* 81 tests (76 fast, 5 marked `slow`) and a GitHub Actions run. There were none.
 * Removed unreachable code: `pca_warp()`, `error1by1()` and the `onebyone` branch,
   `load_elecs_txt()`, `transform_to_ctf.apply()`, and the commented-out regularizer variants.
   `ruff` is clean.
 
 ## Citing
-If you find the headmodel individualization useful for your research, please consider citing our related [paper](https://direct.mit.edu/imag/article/doi/10.1162/IMAG.a.1073/134446).
+If you find the headmodel individualization useful for your research, please consider citing our related [paper](https://direct.mit.edu/imag/article/doi/10.1162/IMAG.a.1073/134446). For infant head models, also cite the template papers listed in [section 8](#8-infants-2-weeks--2-years).
 ```
 @article{Harmening_2026,
       author  = {Harmening, Nils and

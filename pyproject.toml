@@ -27,10 +27,11 @@ dev = ["pytest>=7.0", "ruff>=0.1"]
 
 [project.scripts]
 pcawarp = "PCAwarp:main"
+infantwarp = "infantwarp:main"
 
 [tool.setuptools]
 packages = ["src"]
-py-modules = ["PCAwarp"]
+py-modules = ["PCAwarp", "infantwarp"]
 
 [tool.setuptools.package-data]
 src = ["template.nii", "transform_acpc2ctf_icbm.npy"]

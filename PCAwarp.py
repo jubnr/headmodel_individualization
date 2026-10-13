@@ -290,21 +290,22 @@ def to_millimetres(scalp, fiducials):
 # =====================
 # Export Functions
 # =====================
-def export_openmeeg(bnd_w, output_dir):
-    for shell in SHELLS:
+def export_openmeeg(bnd_w, output_dir, shells=SHELLS, prefix='pca_warped'):
+    for shell in shells:
         write_tri(bnd_w[shell][0], bnd_w[shell][1],
-                  pth(output_dir, f'pca_warped_{shell}.tri'))
+                  pth(output_dir, f'{prefix}_{shell}.tri'))
         try:
             import trimesh
             mesh = trimesh.Trimesh(bnd_w[shell][0], bnd_w[shell][1])
-            mesh.export(pth(output_dir, f'pca_warped_{shell}.stl'),
+            mesh.export(pth(output_dir, f'{prefix}_{shell}.stl'),
                         file_type='stl_ascii')
         except ImportError:
             pass
 
 
 def export_fieldtrip(bnd_w, output_dir, coordsys='digitized', eye_pos=None,
-                     fiducials=None, hartmut=None, fname='pcawarp_bnd.mat'):
+                     fiducials=None, hartmut=None, fname='pcawarp_bnd.mat',
+                     shells=SHELLS):
     """Write the surfaces as bnd.mat to be used by fieldtrip's dipolefitting.
 
     Standard FieldTrip constructs only: a 4-element mesh array `bnd` (scalp,
@@ -326,15 +327,15 @@ def export_fieldtrip(bnd_w, output_dir, coordsys='digitized', eye_pos=None,
 
     dtype = np.dtype([('pos', 'O'), ('tri', 'O'), ('unit', 'O'),
                       ('coordsys', 'O')])
-    bnd = np.empty((1, len(SHELLS)), dtype=dtype)
-    for i, shell in enumerate(SHELLS):
+    bnd = np.empty((1, len(shells)), dtype=dtype)
+    for i, shell in enumerate(shells):
         pos, tri = bnd_w[shell]
         bnd[0, i]['pos'] = np.asarray(pos, dtype=float)
         bnd[0, i]['tri'] = np.asarray(tri, dtype=float) + 1  # MATLAB uses 1-based indexing
         bnd[0, i]['unit'] = 'mm'
         bnd[0, i]['coordsys'] = coordsys
 
-    out = {'bnd': bnd, 'tissue': np.array(SHELLS, dtype=object)}
+    out = {'bnd': bnd, 'tissue': np.array(shells, dtype=object)}
     if eye_pos is not None and len(eye_pos):
         out['eye'] = {'pos': np.asarray(eye_pos, dtype=float)}
     if fiducials is not None and len(fiducials):
@@ -396,9 +397,9 @@ def warp_artefacts_ctf(bnd_w_ctf):
     return new_pos_ctf, eye_ctf, model
 
 
-def export_npy(bnd_w, transform, output_dir):
-    np.save(pth(output_dir, 'pca_warped_bnd.npy'), bnd_w)
-    np.save(pth(output_dir, 'pca_warped_bnd_transform.npy'), transform)
+def export_npy(bnd_w, transform, output_dir, prefix='pca_warped'):
+    np.save(pth(output_dir, f'{prefix}_bnd.npy'), bnd_w)
+    np.save(pth(output_dir, f'{prefix}_bnd_transform.npy'), transform)
 
 
 def export_cedalion(bnd_w, transform, fiducials, output_dir):

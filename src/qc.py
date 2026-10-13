@@ -279,7 +279,7 @@ def summary(report):
     moved = report.get('displacement_from_template')
     if moved:
         lines.append(f"  warp moved the scalp {moved['rms_mm']:.1f} mm RMS "
-                     f"({moved['max_mm']:.1f} mm max) from the mean head")
+                     f"({moved['max_mm']:.1f} mm max) from the template")
     if 'field_of_view_fraction' in report:
         worst = min(report['field_of_view_fraction'].items(),
                     key=lambda kv: kv[1])
@@ -382,23 +382,34 @@ def figure(bnd, scalp_points, report, template_scalp, path):
                  loc='left')
     ax.tick_params(axis='x', labelsize=8)
 
-    # F. the fitted PCA weights
+    # F. the fitted PCA weights, or for a template warp (no PCA) how far
+    # each scalp vertex moved
     ax = fig.add_subplot(grid[1, 2])
+    title = 'F  Fitted PC coefficients'
     if 'pc_weights' in report:
         w = np.asarray(report['pc_weights']['weights'])
         ax.bar(np.arange(1, len(w) + 1), w, color='tab:blue')
         ax.axhline(0, c='k', lw=0.8)
         ax.set_xlabel('principal component')
         ax.set_ylabel('coefficient')
+    elif (template_scalp is not None and
+          np.shape(bnd['scalp'][0]) == np.shape(template_scalp[0])):
+        title = 'F  Scalp displacement'
+        ax.hist(np.linalg.norm(np.asarray(bnd['scalp'][0])
+                               - np.asarray(template_scalp[0]), axis=1),
+                bins=60, color='tab:blue')
+        ax.set_xlabel('vertex displacement from template [mm]')
+        ax.set_ylabel('# vertices')
     moved = report.get('displacement_from_template')
-    title = 'F  Fitted PC coefficients'
     if moved:
         title += (f"  -  scalp moved {moved['rms_mm']:.1f} mm RMS, "
-                  f"{moved['max_mm']:.1f} mm max from the mean head")
+                  f"{moved['max_mm']:.1f} mm max from the template")
     ax.set_title(title, fontsize=9.5, loc='left')
 
     status = 'PASSED' if report['passed'] else 'FAILED'
-    fig.suptitle(f'PCAwarp QC  -  {status}', fontsize=13,
+    method = report.get('provenance', {}).get('method', 'PCAwarp')
+    fig.suptitle(f'{method[:1].upper() + method[1:]} QC  -  {status}',
+                 fontsize=13,
                  color='tab:green' if report['passed'] else 'tab:red')
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
